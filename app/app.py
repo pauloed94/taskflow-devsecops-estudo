@@ -1,4 +1,3 @@
-import os
 """
 TaskFlow - Aplicacao de exemplo da disciplina DevSecOps.
 
