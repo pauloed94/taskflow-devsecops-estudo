@@ -17,15 +17,19 @@ Ao longo dos encontros, cada uma dessas falhas sera identificada por uma
 ferramenta especifica da esteira e corrigida em uma versao "fixed" do codigo.
 """
 
+import os
 import sqlite3
 
 from flask import Flask, g, redirect, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
-# Vulnerabilidade #3: segredo hardcoded no repositorio.
-# Uma ferramenta de SAST/secret-scanning (ex: Gitleaks, Semgrep) deve
-# sinalizar esta linha como "Hardcoded Secret".
+# A chave vem do ambiente; sem ela o app recusa iniciar (nao cai num valor fixo).
+_secret_key = os.environ.get("TASKFLOW_SECRET_KEY")
+if not _secret_key:
+    raise RuntimeError("Variavel de ambiente TASKFLOW_SECRET_KEY nao foi definida.")
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "s3gr3d0-super-secreto-nao-mude-nunca"
+app.config["SECRET_KEY"] = _secret_key
 
 DATABASE = "taskflow.db"
 
@@ -69,14 +73,14 @@ def init_db():
 
     cur = db.execute("SELECT COUNT(*) AS total FROM users")
     if cur.fetchone()["total"] == 0:
-        # Vulnerabilidade #4: senha em texto puro, sem hashing.
+        # Usuarios de demonstracao: no banco fica so o hash (com salt), nunca a senha.
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("admin", "admin123"),
+            ("admin", generate_password_hash("admin123")),
         )
         db.execute(
             "INSERT INTO users (username, password) VALUES (?, ?)",
-            ("aluno", "senha123"),
+            ("aluno", generate_password_hash("senha123")),
         )
         db.commit()
 
@@ -95,21 +99,13 @@ def login():
         username = request.form["username"]
         password = request.form["password"]
 
-        # Vulnerabilidade #1: SQL Injection.
-        # A query e montada por concatenacao de string em vez de usar
-        # parametros preparados (placeholders "?").
-        query = (
-            "SELECT * FROM users WHERE username = '"
-            + username
-            + "' AND password = '"
-            + password
-            + "'"
-        )
+        # Consulta parametrizada: o banco recebe o SQL e os valores separados.
         db = get_db()
-        cur = db.execute(query)
+        cur = db.execute("SELECT * FROM users WHERE username = ?", (username,))
         user = cur.fetchone()
 
-        if user:
+        # A senha e conferida em Python: recalcula o hash com o mesmo salt e compara.
+        if user and check_password_hash(user["password"], password):
             session["user_id"] = user["id"]
             session["username"] = user["username"]
             return redirect(url_for("tasks"))
@@ -141,15 +137,12 @@ def tasks():
     db = get_db()
 
     if search:
-        # Vulnerabilidade #1 (variante): SQL Injection tambem na busca.
-        query = (
-            "SELECT * FROM tasks WHERE user_id = "
-            + str(session["user_id"])
-            + " AND title LIKE '%"
-            + search
-            + "%'"
-        )
-        rows = db.execute(query).fetchall()
+        # O padrao do LIKE tambem vai como parametro (um unico "?").
+        like_pattern = f"%{search}%"
+        rows = db.execute(
+            "SELECT * FROM tasks WHERE user_id = ? AND title LIKE ?",
+            (session["user_id"], like_pattern),
+        ).fetchall()
     else:
         rows = db.execute(
             "SELECT * FROM tasks WHERE user_id = ?", (session["user_id"],)
