@@ -20,7 +20,7 @@ ferramenta especifica da esteira e corrigida em uma versao "fixed" do codigo.
 import os
 import sqlite3
 
-from flask import Flask, g, redirect, request, session, url_for
+from flask import Flask, g, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 # A chave vem do ambiente; sem ela o app recusa iniciar (nao cai num valor fixo).
@@ -85,6 +85,27 @@ def init_db():
         db.commit()
 
 
+# Cria as tabelas e os usuarios de demonstracao ao carregar o modulo
+# (assim o gunicorn tambem inicializa o banco).
+with app.app_context():
+    init_db()
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; frame-ancestors 'none'; form-action 'self'"
+    )
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/")
 def index():
     if "user_id" not in session:
@@ -111,15 +132,7 @@ def login():
             return redirect(url_for("tasks"))
         error = "Usuario ou senha invalidos."
 
-    return f"""
-    <h1>TaskFlow - Login</h1>
-    <form method="post">
-        Usuario: <input type="text" name="username"><br>
-        Senha: <input type="password" name="password"><br>
-        <input type="submit" value="Entrar">
-    </form>
-    <p style="color:red">{error or ""}</p>
-    """
+    return render_template("login.html", error=error)
 
 
 @app.route("/logout")
@@ -148,28 +161,10 @@ def tasks():
             "SELECT * FROM tasks WHERE user_id = ?", (session["user_id"],)
         ).fetchall()
 
-    items = ""
-    for row in rows:
-        # Vulnerabilidade #2: XSS armazenado. A descricao do usuario e
-        # inserida direto no HTML, sem escaping (Jinja2 com | safe
-        # ou f-string manual como aqui tem o mesmo efeito).
-        items += f"""
-        <li>
-            <b>{row['title']}</b> - {row['description']}
-            {'(feita)' if row['done'] else ''}
-        </li>
-        """
-
-    return f"""
-    <h1>Minhas tarefas ({session['username']})</h1>
-    <form method="get">
-        <input type="text" name="q" placeholder="buscar tarefa">
-        <input type="submit" value="Buscar">
-    </form>
-    <ul>{items}</ul>
-    <a href="{url_for('new_task')}">Nova tarefa</a> |
-    <a href="{url_for('logout')}">Sair</a>
-    """
+    # Os dados vao para o template; o Jinja2 escapa tudo automaticamente.
+    return render_template(
+        "tasks.html", tasks=rows, username=session["username"], search=search
+    )
 
 
 @app.route("/tasks/new", methods=["GET", "POST"])
@@ -188,33 +183,10 @@ def new_task():
         db.commit()
         return redirect(url_for("tasks"))
 
-    return """
-    <h1>Nova tarefa</h1>
-    <form method="post">
-        Titulo: <input type="text" name="title"><br>
-        Descricao: <textarea name="description"></textarea><br>
-        <input type="submit" value="Salvar">
-    </form>
-    """
-
-
-# Vulnerabilidade #5: endpoint de debug/diagnostico exposto sem
-# autenticacao, vazando informacoes internas do servidor.
-@app.route("/debug/info")
-def debug_info():
-    import platform
-    import sys
-
-    return {
-        "python_version": sys.version,
-        "platform": platform.platform(),
-        "secret_key": app.config["SECRET_KEY"],
-    }
+    return render_template("new_task.html")
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
-    # debug=True em producao expoe o Werkzeug debugger interativo
-    # (execucao remota de codigo) - tambem sera sinalizado pelo SAST.
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # Execucao local; no container quem serve a aplicacao e o gunicorn.
+    # O debug fica desligado, a menos que TASKFLOW_DEBUG=1 seja definido.
+    app.run(host="127.0.0.1", port=5000, debug=os.environ.get("TASKFLOW_DEBUG") == "1")
